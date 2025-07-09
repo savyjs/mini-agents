@@ -13,14 +13,6 @@ search_agent = Agent(
     """,
     tools=[google_search],
 )
-coding_agent = Agent(
-    model=LiteLlm(model="openai/gpt-4o"),
-    name='CodeAgent',
-    instruction="""
-    You're a specialist in Code Execution
-    """,
-    executor=[BuiltInCodeExecutor],
-)
 
 # (Requires OPENAI_API_KEY)
 root_agent = Agent(
@@ -33,5 +25,5 @@ root_agent = Agent(
     instruction=(
         "You are a helpful agent who can answer user questions about the coding using google search"
     ),
-    tools=[agent_tool.AgentTool(agent=search_agent), agent_tool.AgentTool(agent=coding_agent)],
+    tools=[agent_tool.AgentTool(agent=search_agent)],
 )
