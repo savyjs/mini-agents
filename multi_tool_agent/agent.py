@@ -1,5 +1,4 @@
 from google.adk.agents import LlmAgent, Agent
-from google.adk.code_executors import BuiltInCodeExecutor
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.tools import google_search, agent_tool
 
@@ -8,9 +7,7 @@ from google.adk.tools import google_search, agent_tool
 search_agent = Agent(
     model=LiteLlm(model="openai/gpt-4o"),
     name='SearchAgent',
-    instruction="""
-    You're a specialist in Google Search
-    """,
+    instruction="You're a specialist in Google Search",
     tools=[google_search],
 )
 
