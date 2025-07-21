@@ -37,7 +37,7 @@ print(f"✅ Audio saved to: {wav_path}")
 
 # 🔹 3. Transcribe using Whisper
 # model = whisper.load_model("base")  # or 'small', 'medium', 'large'
-model = whisper.load_model("turbo")  # or 'small', 'medium', 'large'
+model = whisper.load_model("small.en")  # or 'small', 'medium', 'large'
 print("🧠 Transcribing...")
 result = model.transcribe(wav_path, word_timestamps=True)
 
