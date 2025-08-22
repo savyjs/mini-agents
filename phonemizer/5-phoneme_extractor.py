@@ -7,7 +7,7 @@ from huggingface_hub import hf_hub_download
 from tqdm import tqdm
 import os
 from pathlib import Path
-import sounddevice as sd  # For microphone recording
+import sounddevice as sd
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog
@@ -15,10 +15,13 @@ from tkinter import filedialog
 # -------------------------------
 # Config
 # -------------------------------
-AUDIO_PATH = r"converted_audio.wav"  # Default path for saving recorded or selected audio
+AUDIO_PATH = r"converted_audio.wav"
 MODEL_NAME = "facebook/wav2vec2-lv-60-espeak-cv-ft"
 FRAME_STRIDE = 0.02  # seconds per frame
-SILENCE_THRESHOLD = 0.1  # Adjusted for finer word segmentation
+SILENCE_THRESHOLD = 0.2  # Silence duration for word separation
+MIN_WORD_DURATION = 0.1  # Minimum duration for a word
+MIN_GAP_DURATION = 0.05  # Reduced for better gap detection
+ENERGY_THRESHOLD_FACTOR = 1.5  # Factor for stress detection
 CSV_EXPORT = "phonemes_output.csv"
 CACHE_DIR = os.path.expanduser("~/.cache/huggingface/transformers")
 
@@ -33,21 +36,23 @@ phoneme_to_ipa = {
     "OW": "oʊ", "OY": "ɔɪ", "P": "p", "R": "ɹ", "S": "s", "SH": "ʃ",
     "T": "t", "TH": "θ", "UH": "ʊ", "UW": "u", "V": "v", "W": "w",
     "Y": "j", "Z": "z", "ZH": "ʒ",
-    "SIL": "‖", "SPN": "…", "UNK": "�"
+    "AEː": "æː", "AHː": "ɐː", "IYː": "iː", "UWː": "uː", "ERː": "ɚ",
+    "OI": "ɔɪ", "OU": "oʊ", "AI": "aɪ", "AU": "aʊ",
+    "TS": "ts", "Tʃ": "tʃ", "Dʒ": "dʒ", "ɡʲ": "ɡʲ",
+    "NY": "ɲ", "LH": "ɬ", "LL": "ʎ", "RH": "ʁ",
+    "SIL": "<s>", "PAD": "<pad>", "EOS": "</s>", "UNK": "<unk>"
 }
 
+# Create the inverse mapping
+ipa_to_phoneme = {ipa: phoneme for phoneme, ipa in phoneme_to_ipa.items()}
+
 
 # -------------------------------
-# Helper Functions for Audio Input
+# Helper Functions
 # -------------------------------
 def record_audio(sample_rate=16000):
-    """
-    Record audio from system microphone with start/stop functionality.
-    Press Enter to start and stop recording.
-    Returns audio data as numpy array.
-    """
     print("Press Enter to start recording...")
-    input()  # Wait for user to press Enter
+    input()
     print("Recording... Press Enter to stop.")
     recording = []
 
@@ -58,22 +63,20 @@ def record_audio(sample_rate=16000):
 
     stream = sd.InputStream(samplerate=sample_rate, channels=1, callback=callback)
     with stream:
-        input()  # Wait for user to press Enter to stop
+        input()
     audio = np.concatenate(recording, axis=0)
     return audio
 
 
 def save_audio(audio, sample_rate, output_path):
-    """Save numpy array as WAV file."""
-    audio_tensor = torch.tensor(audio.T, dtype=torch.float32)  # Convert to torch tensor
+    audio_tensor = torch.tensor(audio.T, dtype=torch.float32)
     torchaudio.save(output_path, audio_tensor, sample_rate)
     print(f"Audio saved to {output_path}")
 
 
 def select_audio_file():
-    """Open a file dialog to select an audio file."""
     root = tk.Tk()
-    root.withdraw()  # Hide the main window
+    root.withdraw()
     file_path = filedialog.askopenfilename(
         title="Select Audio File",
         filetypes=[("Audio Files", "*.wav *.mp3 *.flac")]
@@ -82,6 +85,15 @@ def select_audio_file():
     if not file_path:
         raise FileNotFoundError("No file selected.")
     return file_path
+
+
+def compute_rms_energy(audio, start_time, end_time, sample_rate):
+    start_sample = int(start_time * sample_rate)
+    end_sample = int(end_time * sample_rate)
+    segment = audio[start_sample:end_sample]
+    if len(segment) == 0:
+        return 0.0
+    return np.sqrt(np.mean(segment ** 2))
 
 
 # -------------------------------
@@ -96,11 +108,9 @@ if not vocab_path.exists():
 with open(vocab_path, "r", encoding="utf-8") as f:
     phoneme_vocab = json.load(f)
 
-# Invert to get ID -> phoneme
 id2phoneme = {v: k for k, v in phoneme_vocab.items()}
 print(f"Phoneme vocab loaded: {len(id2phoneme)} phonemes.")
-print("Phoneme vocabulary:", list(id2phoneme.values()))
-print()
+# print("id2phoneme:", id2phoneme)
 
 # -------------------------------
 # Load model + processor
@@ -137,17 +147,26 @@ if not os.path.exists(AUDIO_PATH):
     raise FileNotFoundError(f"Audio file not found: {AUDIO_PATH}")
 speech_array, sr = torchaudio.load(AUDIO_PATH)
 print(f"Original SR: {sr}, channels: {speech_array.shape[0]}")
+audio_duration = len(speech_array.squeeze()) / sr
+print(f"Audio duration: {audio_duration:.2f}s")
 
 if sr != 16000:
     print("Resampling to 16kHz...")
     resampler = torchaudio.transforms.Resample(sr, 16000)
     speech_array = resampler(speech_array)
 
-# Ensure mono audio
 if speech_array.shape[0] > 1:
     speech_array = torch.mean(speech_array, dim=0, keepdim=True)
+speech_array_np = speech_array.squeeze().numpy()
 inputs = processor(speech_array.squeeze(), sampling_rate=16000, return_tensors="pt")
 print("Audio processed for model input.\n")
+
+# -------------------------------
+# Compute global energy threshold for stress
+# -------------------------------
+global_rms = compute_rms_energy(speech_array_np, 0, len(speech_array_np) / 16000, 16000)
+energy_threshold = global_rms * ENERGY_THRESHOLD_FACTOR
+print(f"Global RMS energy: {global_rms:.4f}, Stress threshold: {energy_threshold:.4f}\n")
 
 # -------------------------------
 # Inference
@@ -161,83 +180,83 @@ print(f"Total frames: {len(pred_ids)} | Unique phonemes: {len(set(pred_ids))}")
 print(f"First 20 predicted IDs: {pred_ids[:20]}\n")
 
 # -------------------------------
-# Frame → phoneme segments
+# Frame → phoneme segments with stress
 # -------------------------------
 print("Creating phoneme segments...")
+pure_segments = []
 segments = []
-prev_id, start_time = None, 0.0
-
+gaps = []
+prev_phoneme, start_time = None, 0.0
+special_tokens = ['<pad>', '<s>', '</s>']
+pad_counter = 0
 for i, p_id in enumerate(pred_ids):
     phoneme = id2phoneme.get(p_id, "UNK")
+    print("phoneme:", phoneme)
+    if phoneme in special_tokens:
+        if phoneme == prev_phoneme and phoneme is not None and len(pure_segments) > 0:
+            print("Skipped special token:", phoneme)
+            pad_counter = 1 + pad_counter
+            if pad_counter > 5 and pure_segments[-1] != " ":
+                pure_segments.append(" ")
+                pad_counter = 0
+        prev_phoneme = phoneme
+        continue
     time = i * FRAME_STRIDE
-    if phoneme != prev_id:
-        if prev_id is not None:
-            segments.append({
-                "phoneme": prev_id,
-                "ipa": phoneme_to_ipa.get(prev_id, prev_id),
-                "start": start_time,
-                "end": time
-            })
+    if phoneme != prev_phoneme and phoneme is not None and phoneme not in special_tokens:
+        print("detected phoneme:", phoneme)
+        segment_duration = time - start_time
+        segment_rms = compute_rms_energy(speech_array_np, start_time, time, 16000)
+        is_stressed = "stressed" if segment_rms > energy_threshold else "unstressed"
+        segment_data = {
+            "phoneme": ipa_to_phoneme.get(phoneme, phoneme),
+            "ipa": phoneme_to_ipa.get(phoneme, phoneme),
+            "start": start_time,  # IS NOT ACCURATE
+            "end": time,  # IS NOT ACCURATE
+            "energy": segment_rms,
+            "energyPercentage": segment_rms / global_rms * 100,
+            "stress": is_stressed
+        }
+
+        print("added phoneme:", phoneme)
+        segments.append(segment_data)
+        pure_segments.append(phoneme)
         start_time = time
-        prev_id = phoneme
-
-if prev_id is not None:
-    segments.append({
-        "phoneme": prev_id,
-        "ipa": phoneme_to_ipa.get(prev_id, prev_id),
-        "start": start_time,
-        "end": len(pred_ids) * FRAME_STRIDE
-    })
-
-print(f"Segments created: {len(segments)}\n")
-
-# -------------------------------
-# Group phonemes into word-like chunks
-# -------------------------------
-print("Grouping phonemes into words...")
-words = []
-current_word = []
-
-for seg in segments:
-    if seg["phoneme"] in ["SIL", "SPN"] or (seg["end"] - seg["start"]) > SILENCE_THRESHOLD:
-        if current_word:
-            words.append(current_word)
-            current_word = []
     else:
-        current_word.append(seg)
-if current_word:
-    words.append(current_word)
+        print("Invalid or Duplicated: ", phoneme)
+    prev_phoneme = phoneme
 
-print(f"Total words detected: {len(words)}\n")
+print(f"Segments created: {len(segments)}")
+print("Phoneme segments:", [(s['phoneme'], s['ipa'], s['start'], s['end'], s['stress']) for s in segments])
+print(f"Gaps detected: {len(gaps)}\n")
 
 # -------------------------------
-# Print results
+# Print results in IPA format
 # -------------------------------
 print("=== Phoneme Segments ===")
 for s in segments:
-    print(f"{s['start']:.2f}-{s['end']:.2f} : {s['phoneme']} -> {s['ipa']}")
+    print(
+        f"{s['start']:.2f}-{s['end']:.2f} : {s['phoneme']} -> {s['ipa']} ({s['stress']}, energy={s['energyPercentage']:.1f}%)")
 
-print("\n=== Word-like groups ===")
-for i, word in enumerate(words, 1):
-    ipa_word = "-".join([seg["ipa"] for seg in word])
-    print(f"Word {i}: {ipa_word}")
+# Save JSON to file and wait until fully written
+# Convert floats to regular Python floats
+safe_segments = []
+for seg in segments:
+    safe_segments.append({
+        "start": float(seg["start"]),
+        "end": float(seg["end"]),
+        "IPA": seg["ipa"],
+        "Phoneme": seg["phoneme"],
+        "hasStress": seg["stress"] == "stressed",
+        "energy": float(seg["energy"]),
+        "energyPercentage": float(seg["energyPercentage"])
+    })
 
-print("\n=== Detailed Word Groups ===")
-for i, word in enumerate(words, 1):
-    ipa_word = "-".join([seg["ipa"] for seg in word])
-    phonemes = [seg["phoneme"] for seg in word]
-    duration = sum(seg["end"] - seg["start"] for seg in word)
-    print(f"Word {i}: IPA={ipa_word}, Phonemes={phonemes}, Duration={duration:.2f}s")
+# Save JSON safely
+JSON_EXPORT = "phoneme_segments.json"
+with open(JSON_EXPORT, "w", encoding="utf-8") as f:
+    json.dump(safe_segments, f, ensure_ascii=False, indent=4)
+    f.flush()
+    os.fsync(f.fileno())
 
-# -------------------------------
-# Export CSV
-# -------------------------------
-print(f"\nExporting to CSV: {CSV_EXPORT} ...")
-with open(CSV_EXPORT, "w", newline="", encoding="utf-8") as csvfile:
-    writer = csv.writer(csvfile)
-    writer.writerow(["word_index", "start", "end", "phoneme", "IPA"])
-    for idx, word in enumerate(words, 1):
-        for seg in word:
-            writer.writerow([idx, f"{seg['start']:.3f}", f"{seg['end']:.3f}", seg["phoneme"], seg["ipa"]])
-
+print("Output:", "".join(pure_segments))
 print("Export complete.\nAll done!")
