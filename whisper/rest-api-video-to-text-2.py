@@ -47,7 +47,7 @@ FRAME_STRIDE = 0.02  # seconds per frame
 SILENCE_THRESHOLD = 0.2  # Silence duration for word separation
 MIN_WORD_DURATION = 0.1  # Minimum duration for a word
 MIN_GAP_DURATION = 0.05  # Reduced for better gap detection
-ENERGY_THRESHOLD_FACTOR = 1.5  # Factor for stress detection
+ENERGY_THRESHOLD_FACTOR = 2  # Factor for stress detection
 CACHE_DIR = os.path.expanduser("~/.cache/huggingface/transformers")
 
 # -------------------------------
@@ -156,17 +156,23 @@ def extract_phonemes(audio_file_path):
         phoneme = id2phoneme.get(p_id, "UNK")
         if phoneme in special_tokens:
             if phoneme == prev_phoneme and phoneme is not None and len(ipa_segments) > 0:
-                pad_counter = 1 + pad_counter
-                if pad_counter > 5 and ipa_segments[-1] != " ":
+                pad_counter += 1
+                if pad_counter > 10 and ipa_segments[-1] != " ":
                     ipa_segments.append(" ")
                     pad_counter = 0
             prev_phoneme = phoneme
             continue
+        else:
+            pad_counter = 0
         time = i * FRAME_STRIDE
         if phoneme != prev_phoneme and phoneme is not None and phoneme not in special_tokens:
             segment_duration = time - start_time
             segment_rms = compute_rms_energy(speech_array_np, start_time, time, 16000)
             is_stressed = segment_rms > energy_threshold
+
+            if is_stressed:
+                ipa_segments.append("ˈ")
+
             segment_data = {
                 "phoneme": ipa_to_phoneme.get(phoneme, phoneme),
                 "ipa": phoneme_to_ipa.get(phoneme, phoneme),
@@ -176,9 +182,6 @@ def extract_phonemes(audio_file_path):
                 "energyPercentage": segment_rms / global_rms * 100,
                 "hasStress": is_stressed
             }
-
-            if is_stressed:
-                ipa_segments.append("'")
 
             ipa_object_segments.append(segment_data)
             ipa_segments.append(phoneme)
